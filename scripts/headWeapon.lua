@@ -1,17 +1,28 @@
+-- Head Weapon VR Mod
+-- Cleaned, organized, and commented in US English
+
 local api = uevr.api
 local vr = uevr.params.vr
 
+-- UObject references
 local hitresult_c = api:find_uobject("ScriptStruct /Script/Engine.HitResult")
-local AnimMontage_c = api:find_uobject("Class /Script/Engine.AnimMontage")
+local LegacyCameraShake_c = api:find_uobject("Class /Script/GameplayCameras.MatineeCameraShake")
 
--- Weapon offset configuration
+-- Weapon offset configuration (for aligning with hand in VR)
 local weapon_location_offset = Vector3f.new(0.0, 0.0, 0.0)
-local weapon_rotation_offset = Vector3f.new(-100.0, 1.80, 0.0)
+local weapon_rotation_offset = Vector3f.new(-100.0, 0.0, 0.0)
 
+-- Globals
 local empty_hitresult = StructObject.new(hitresult_c)
+local swinging_fast = false
+local swing_threshold = 2.5  -- Minimum velocity to detect a swing
+local swing_cooldown = 0.15  -- Time between valid swings (to prevent spamming)
+local config_filename = "moriaconfig.txt"
+local config_data = ""
+local gesture_on = 1
+local hide_Mesh_bool = true
 
-local swing_cooldown = 0.15
-
+-- Runtime melee motion data
 local melee_data = {
     pos_now = Vector3f.new(0, 0, 0),
     pos_prev = Vector3f.new(0, 0, 0),
@@ -21,70 +32,78 @@ local melee_data = {
 }
 
 local saved_rotation = nil
-local blocked_montages = {
-    ["Dwa_Pick_Mine_SwingFull_Big_Montage"] = true,
-    ["Dwa_FGK_Axe_Mine_SwingFull_Big_1H_Montage"] = true,
-    ["Gob_UA_Squat_Dig_Loop_VarA_Montage"] = true,
-    ["Gob_UA_Squat_Dig_Loop_VarA_Montage_Loop"] = true
-}
 
+-- Helper: Finds UObject or errors
 local function find_required_object(name)
     local obj = uevr.api:find_uobject(name)
     if not obj then
         error("Cannot find " .. name)
-        return nil
     end
-
     return obj
 end
 
+-- Writes gesture toggle to config file
 local function write_config()
-	config_data = "gesture =" .. tostring(gesture_on) .. "\n" ..
+    config_data = "gesture =" .. tostring(gesture_on) .. "\n"
     fs.write(config_filename, config_data)
 end
 
+-- Reads gesture toggle from config file
 local function read_config()
     config_data = fs.read(config_filename)
     if config_data then 
         for key, value in config_data:gmatch("([^=]+)=([^\n]+)\n?") do
-            print("parsing key:", key, "value:", value)
             if key == "gesture" then
                 gesture_on = (value == "true" or value == "1") and 1 or 0
             end
         end
     else
         print("Error: Could not read config file.")
-        gesture_on = 1
-        write_config()
     end
 end
 
--- Applies motion controller state to the weapon
+-- Hides mesh component (avoids rendering in VR view)
+local function hide_Mesh(name)
+    if name then
+        name:SetRenderInMainPass(false)
+        name:SetRenderCustomDepth(false)
+    end
+end
+
+-- Updates weapon state with motion controller info
 local function update_weapon_motion_controller()
     local pawn = api:get_local_pawn(0)
     if not pawn or not pawn.Children then return end
-    --local empty_hitresult = StructObject.new(hitresult_c)
 
     for _, component in ipairs(pawn.Children) do
-        
-        if component and UEVR_UObjectHook.exists(component)  then
-        
+        if component and UEVR_UObjectHook.exists(component) and (not string.find(component:get_full_name(), "DwarfDeath")) then
             local state = UEVR_UObjectHook.get_or_add_motion_controller_state(component.RootComponent)
             if state then
-                if  string.find(component:get_full_name(), "Torch")  then  
+                if string.find(component:get_full_name(), "Torch") then  
+                    hide_Mesh(component.RaycastMesh)
+                    state:set_hand(0)  -- Left hand  
+                elseif string.find(component:get_full_name(), "Shield") then  
                     state:set_hand(0)  -- Left hand  
                 else              
                     state:set_hand(1)  -- Right hand
                 end
                 state:set_permanent(true)
                 state:set_location_offset(weapon_location_offset)
-                state:set_rotation_offset(weapon_rotation_offset)                
-            end        
+                if string.find(component:get_full_name(), "Mattock") then  
+                    state:set_rotation_offset(Vector3f.new(-100.0, 3.3, 0.0)) 
+                elseif string.find(component:get_full_name(), "Hammer_2h") then 
+                    state:set_rotation_offset(Vector3f.new(-100.0, 0.0, 0.0)) 
+                elseif string.find(component:get_full_name(), "Hammer") or string.find(component:get_full_name(), "Pick_") then 
+                    state:set_rotation_offset(Vector3f.new(-100.0, 1.8, 0.0)) 
+                else             
+                    state:set_rotation_offset(weapon_rotation_offset) 
+                end               
+            end
         end
     end
 end
 
--- Disables camera effects that may cause issues
+-- Disables camera lag and animation-related side effects
 local function disable_camera_effects(pawn)
     local camera_component = pawn:GetComponentByClass(api:find_uobject("Class /Script/Engine.CameraComponent"))
     local attach_parent = camera_component and camera_component.AttachParent
@@ -95,19 +114,19 @@ local function disable_camera_effects(pawn)
 
         local attach_parent_parent = attach_parent.AttachParent
         if attach_parent_parent and attach_parent_parent.ResetLookOperation then
-            attach_parent_parent:ResetLookOperation(nil) -- Reseta ajustes automáticos da câmera
+            attach_parent_parent:ResetLookOperation(nil)
         end
     end
 end
 
--- Keeps the body rotation only on the Yaw axis
+-- Forces character to only rotate on the Yaw (horizontal) axis
 local function update_character_rotation(pawn, rotation)
     local character_rotation = pawn:K2_GetActorRotation()
-    character_rotation.Yaw = rotation.Yaw -- Keeps only the horizontal rotation
+    character_rotation.Yaw = rotation.Yaw
     pawn:K2_SetActorRotation(character_rotation, false)
 end
 
--- Smooths the transition of the camera position (prevents jitter)
+-- Helper: Linear interpolation between two positions
 local function lerp_position(from, to, alpha)
     return Vector3f.new(
         from.X + (to.X - from.X) * alpha,
@@ -116,62 +135,56 @@ local function lerp_position(from, to, alpha)
     )
 end
 
-local function hide_Mesh(name)
-    if name then
-        name:SetRenderInMainPass(false)
-        name:SetRenderCustomDepth(false)
-    end
-end
-
--- Gets the correct head position from the Mesh
+-- Gets head position from Mesh or approximates it
 local function get_head_position(pawn)
     if not pawn or not pawn.Mesh then
         print("Error: Mesh not found!")
-        return pawn:K2_GetActorLocation() -- Returns the default position if the Mesh is not found
+        return pawn:K2_GetActorLocation()
     end
 
-    -- If the head socket exists, retrieves its correct position
     if pawn.Mesh:DoesSocketExist("Head") then
         return pawn.Mesh:GetSocketLocation("Head")
     else
-        -- Otherwise, uses the Mesh position and applies a manual fine adjustment
         local head_pos = pawn.Mesh:K2_GetComponentLocation()
-        head_pos.Z = head_pos.Z + 80 -- Fine adjustment
+        head_pos.Z = head_pos.Z + 80
         return head_pos
     end
 end
 
 read_config()
 
+-- VR Stereo Camera Sync
 uevr.sdk.callbacks.on_early_calculate_stereo_view_offset(function(device, view_index, world_to_meters, position, rotation, is_double)
     local pawn = api:get_local_pawn(0)
     if not pawn then return end
-    
-    hide_Mesh(pawn.Mesh)
-    
-    -- Desativa efeitos de câmera que podem interferir
+
+    -- Hide unnecessary body parts for immersion
+    hide_Mesh(pawn.SK_Backpack)
+    hide_Mesh(pawn.SK_BaseBody)
+    hide_Mesh(pawn.SK_Beard)
+    hide_Mesh(pawn.SK_Chest)
+    hide_Mesh(pawn.SK_Extras)
+    hide_Mesh(pawn.SK_Gloves)
+    hide_Mesh(pawn.SK_Hair)
+    hide_Mesh(pawn.SK_Hands)
+    hide_Mesh(pawn.SK_Hat)
+    hide_Mesh(pawn.SK_Head)
+    hide_Mesh(pawn.SK_Legs)
+
     disable_camera_effects(pawn)
 
-    -- Pega a posição da cabeça diretamente
     local head_pos = get_head_position(pawn)
-    position.x, position.y, position.z = head_pos.X, head_pos.Y, head_pos.Z+70
+    position.x, position.y, position.z = head_pos.X, head_pos.Y, head_pos.Z + 70
 
-    -- Mantém a rotação do personagem apenas no eixo Yaw
     update_character_rotation(pawn, rotation)
 
-    -- Acessa a câmera do personagem
     local camera_component = pawn:GetComponentByClass(api:find_uobject("Class /Script/Engine.CameraComponent"))
-    
     if camera_component then
-        -- Garante que a câmera use transformações absolutas, para evitar herança de animações
         camera_component:SetUsingAbsoluteLocation(true)
         camera_component:SetUsingAbsoluteRotation(true)
-
-        -- Posiciona a câmera exatamente na cabeça
         camera_component:K2_SetWorldLocation(Vector3f.new(position.x, position.y, position.z), false, empty_hitresult, true)
         camera_component:K2_SetWorldRotation(rotation, false)
     else
-        -- Alternativa: usa o PlayerCameraManager se a câmera não for encontrada
         local player_controller = api:get_player_controller(0)
         local camera_manager = player_controller and player_controller.PlayerCameraManager
         if camera_manager then
@@ -181,32 +194,26 @@ uevr.sdk.callbacks.on_early_calculate_stereo_view_offset(function(device, view_i
     end
 end)
 
+-- VR Gesture to Trigger Conversion
 uevr.sdk.callbacks.on_xinput_get_state(function(retval, user_index, state)
-    if gesture_on == 1 then
-        if state ~= nil then
-            if swinging_fast then
-                -- Simula ataque
-                state.Gamepad.bRightTrigger = 200
-            end
-        end
+    if gesture_on == 1 and state and swinging_fast then
+        state.Gamepad.bRightTrigger = 200
     end
 end)
 
+-- Settings UI
 uevr.sdk.callbacks.on_draw_ui(function()
     imgui.text("The Lord of the Rings: Return to Moria Mod Settings")
     imgui.text("Mod by Vilmar de Paula")
     imgui.text("")
     imgui.text("")
     local needs_save = false
-    local changed, new_value
 
-    -- Use more concise boolean conversion
     local gesture_bool = (gesture_on == 1)
-
-    changed, new_value = imgui.checkbox("Trigger attacks through gestures:", gesture_bool)
+    local changed, new_value = imgui.checkbox("Trigger attacks through gestures:", gesture_bool)
     if changed then
+        gesture_on = new_value and 1 or 0
         needs_save = true
-        gesture_on = new_value and 1 or 0 -- Correctly use new_value        
     end
 
     if needs_save then
@@ -214,130 +221,51 @@ uevr.sdk.callbacks.on_draw_ui(function()
     end
 end)
 
-local LegacyCameraShake_c = find_required_object("Class /Script/GameplayCameras.MatineeCameraShake")
-
--- Disable camera shake 1
+-- Disable Camera Shake: BlueprintUpdateCameraShake
 local BlueprintUpdateCameraShake = LegacyCameraShake_c:find_function("BlueprintUpdateCameraShake")
-
-if BlueprintUpdateCameraShake ~= nil then
-    BlueprintUpdateCameraShake:set_function_flags(BlueprintUpdateCameraShake:get_function_flags() | 0x400) -- Mark as native
+if BlueprintUpdateCameraShake then
+    BlueprintUpdateCameraShake:set_function_flags(BlueprintUpdateCameraShake:get_function_flags() | 0x400)
     BlueprintUpdateCameraShake:hook_ptr(function(fn, obj, locals, result)
         obj.ShakeScale = 0.0
-        
         return false
     end)
 end
 
--- Disable camera shake 2
+-- Disable Camera Shake: ReceivePlayShake
 local ReceivePlayShake = LegacyCameraShake_c:find_function("ReceivePlayShake")
-
-if ReceivePlayShake ~= nil then
-    ReceivePlayShake:set_function_flags(ReceivePlayShake:get_function_flags() | 0x400) -- Mark as native
+if ReceivePlayShake then
+    ReceivePlayShake:set_function_flags(ReceivePlayShake:get_function_flags() | 0x400)
     ReceivePlayShake:hook_ptr(function(fn, obj, locals, result)
         obj.ShakeScale = 0.0
         return false
     end)
 end
 
-
--- Main loop for updating weapon controller and firing logic
+-- Per-frame logic for tracking melee swing gesture
 uevr.sdk.callbacks.on_pre_engine_tick(function(engine, delta)
-    
-    if vr.is_hmd_active() then
-        update_weapon_motion_controller()
+    if not vr.is_hmd_active() then return end
 
-        if gesture_on == 1 then
-            vr.get_pose(vr.get_right_controller_index(), melee_data.raw, melee_data.q)
+    update_weapon_motion_controller()
 
-            melee_data.pos_prev:set(melee_data.pos_now.x, melee_data.pos_now.y, melee_data.pos_now.z)
-            melee_data.pos_now:set(melee_data.raw.x, melee_data.raw.y, melee_data.raw.z)
+    if gesture_on == 1 then
+        vr.get_pose(vr.get_right_controller_index(), melee_data.raw, melee_data.q)
 
-            local velocity = (melee_data.pos_now - melee_data.pos_prev) * (1 / delta)
-            local vel_len = velocity:length()
+        melee_data.pos_prev:set(melee_data.pos_now.x, melee_data.pos_now.y, melee_data.pos_now.z)
+        melee_data.pos_now:set(melee_data.raw.x, melee_data.raw.y, melee_data.raw.z)
 
-            local now = os.clock()
+        local velocity = (melee_data.pos_now - melee_data.pos_prev) * (1 / delta)
+        local vel_len = velocity:length()
 
-            -- Detecção de swing
-            if velocity.y < 0 and vel_len >= swing_threshold then
-                if (now - melee_data.last_swing_time) > swing_cooldown then
-                    swinging_fast = true
-                    melee_data.last_swing_time = now
-                end
-            else
-                swinging_fast = false
+        local now = os.clock()
+
+        -- Simple gesture detection
+        if velocity.y < 0 and vel_len >= swing_threshold then
+            if (now - melee_data.last_swing_time) > swing_cooldown then
+                swinging_fast = true
+                melee_data.last_swing_time = now
             end
+        else
+            swinging_fast = false
         end
-
-        local pawn = api:get_local_pawn(0)
-        if not pawn or not pawn.Mesh then return end
-        --pawn.Mesh.AnimScriptInstance = nil
-        local anim_instance = pawn.Mesh.AnimScriptInstance
-        if not anim_instance then return end
-
-        local montage = anim_instance:GetCurrentActiveMontage()
-        
-
-        if montage then
-            
-            local name = montage:get_fname():to_string()
-            print(name)
-            if blocked_montages[name] then
-                montage.bEnableRootMotionTranslation = false
-                -- Bloqueia Root Motion
-                --[[ anim_instance:SetRootMotionMode(1) -- IgnoreRootMotion
-                anim_instance:AnimNotify_StopTransition()
-
-                -- Mantém rotação fixa
-                if not saved_rotation then
-                    saved_rotation = pawn.Mesh:K2_GetComponentRotation()
-                end
-                pawn.Mesh:K2_SetWorldRotation(saved_rotation, false, empty_hitresult, true)
- ]]
-                -- (opcional) print de debug
-                -- print("[VR Patch] RootMotion bloqueado para:", name)
-            end
-        end
-        -- Guardar a rotação "frontal"
-        --[[ if not saved_rotation then
-            saved_rotation = pawn.Mesh:K2_GetComponentRotation()
-        end
-
-        -- Forçar a malha a sempre olhar para frente
-        pawn.Mesh:K2_SetWorldRotation(saved_rotation, false, empty_hitresult, true)
-
-        --pawn.Mesh:SetAnimationMode(0)  -- 0 = AnimationMode::AnimationBlueprint, 1 = AnimationAsset, 2 = AnimationSingleNode
-        
-        local montages = AnimMontage_c:get_objects_matching(false)
-
-        local anim_instance = pawn.Mesh.AnimScriptInstance
-        if anim_instance then
-            local current_montage = anim_instance:GetCurrentActiveMontage()
-            
-            for _, v in ipairs(montages) do
-                local montage_name = v:get_fname():to_string()
-                
-                if string.find(montage_name, "Pick_Mine") then
-                    -- Desativa root motion da montagem
-                    v.bEnableRootMotionTranslation = false
-                    
-                    -- Garante que o anim instance também ignore root motion
-                    anim_instance:SetRootMotionMode(1) -- 1 = IgnoreRootMotion
-                    
-                    -- Interrompe a animação, se ela estiver sendo executada agora
-                    local montage_name = v:get_fname():to_string()
-                    if current_montage and current_montage == v and anim_instance:Montage_IsPlaying(current_montage) then
-                        local ok, err = pcall(function()
-                            anim_instance:Montage_Stop(0.0)                            
-                        end)
-                        if not ok then
-                            print("Erro ao parar montagem:", err)
-                        else
-                            print("Picareta: montagem parada com sucesso:", montage_name)
-                        end
-                    end
-                end
-            end
-        end ]] 
-        --fs.write("config_filename", dataconf)
-    end    
+    end
 end)
