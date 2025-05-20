@@ -93,7 +93,7 @@ local function update_weapon_motion_controller()
                     state:set_rotation_offset(Vector3f.new(-100.0, 3.3, 0.0)) 
                 elseif string.find(component:get_full_name(), "Hammer_2h") then 
                     state:set_rotation_offset(Vector3f.new(-100.0, 0.0, 0.0)) 
-                elseif string.find(component:get_full_name(), "Hammer") or string.find(component:get_full_name(), "Pick_") then 
+                elseif string.find(component:get_full_name(), "Hammer") or string.find(component:get_full_name(), "Pick_") or string.find(component:get_full_name(), "Shield") then 
                     state:set_rotation_offset(Vector3f.new(-100.0, 1.8, 0.0)) 
                 else             
                     state:set_rotation_offset(weapon_rotation_offset) 
