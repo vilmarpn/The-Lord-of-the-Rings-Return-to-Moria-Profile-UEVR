@@ -1,0 +1,14 @@
+{
+    "hide": true,
+    "hide_legacy": false,
+    "path": [
+        "Acknowledged Pawn",
+        "Properties",
+        "Children",
+        "BP_Torch_C BP_Torch_C_20_S_4",
+        "Components",
+        "StaticMeshComponent RaycastMesh"
+    ],
+    "properties": [],
+    "type": "properties"
+}
