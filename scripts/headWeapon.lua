@@ -1,6 +1,3 @@
--- Head Weapon VR Mod
--- Cleaned, organized, and commented in US English
-
 local api = uevr.api
 local vr = uevr.params.vr
 
