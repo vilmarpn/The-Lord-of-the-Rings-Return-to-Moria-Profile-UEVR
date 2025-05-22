@@ -7,7 +7,7 @@ local LegacyCameraShake_c = api:find_uobject("Class /Script/GameplayCameras.Mati
 
 -- Weapon offset configuration (for aligning with hand in VR)
 local weapon_location_offset = Vector3f.new(0.0, 0.0, 0.0)
-local weapon_rotation_offset = Vector3f.new(-100.0, 0.0, 0.0)
+local weapon_rotation_offset = Vector3f.new(0.4, 0.0, 0.0)
 
 -- Globals
 local empty_hitresult = StructObject.new(hitresult_c)
@@ -70,29 +70,38 @@ local function update_weapon_motion_controller()
     if not pawn or type(pawn.Children) ~= "table" then return end
 
     for _, component in ipairs(pawn.Children) do
-        if component and component.RootComponent and UEVR_UObjectHook.exists(component) and (not string.find(component:get_full_name(), "DwarfDeath")) then
-            local state = UEVR_UObjectHook.get_or_add_motion_controller_state(component.RootComponent)
-            if state then
-                local name = component:get_full_name()
-                if string.find(name, "Torch") then
-                    if component.RaycastMesh then hide_Mesh(component.RaycastMesh) end
-                    state:set_hand(0)
-                elseif string.find(name, "Shield") then
-                    state:set_hand(0)
-                else
-                    state:set_hand(1)
-                end
-                state:set_permanent(true)
-                state:set_location_offset(weapon_location_offset)
+        print(pawn)
+        print(pawn.Children)
+        if component and component.RootComponent and UEVR_UObjectHook.exists(component) then
+            print("comp", component:get_full_name())
+            if (string.find(component:get_full_name(), "EQ_")) or string.find(component:get_full_name(), "Torch") then
+                local state = UEVR_UObjectHook.get_or_add_motion_controller_state(component.RootComponent)
+                if state then
+                    local name = component:get_full_name()
+                    if string.find(name, "Torch") then
+                        if component.RaycastMesh then hide_Mesh(component.RaycastMesh) end
+                        state:set_hand(0)
+                    elseif string.find(name, "Shield") then
+                        state:set_hand(0)
+                    else
+                        state:set_hand(1)
+                    end
+                    state:set_permanent(true)
+                    state:set_location_offset(weapon_location_offset)
 
-                if string.find(name, "Mattock") then
-                    state:set_rotation_offset(Vector3f.new(-100.0, 3.3, 0.0))
-                elseif string.find(name, "Hammer_2h") then
-                    state:set_rotation_offset(Vector3f.new(-100.0, 0.0, 0.0))
-                elseif string.find(name, "Hammer") or string.find(name, "Pick_") or string.find(name, "Shield") then
-                    state:set_rotation_offset(Vector3f.new(-100.0, 1.8, 0.0))
-                else
-                    state:set_rotation_offset(weapon_rotation_offset)
+                    if string.find(name, "Mattock") then
+                        state:set_rotation_offset(Vector3f.new(0.4, 3.3, 0.0))
+                    elseif string.find(name, "Hammer_2h") then
+                        state:set_rotation_offset(Vector3f.new(0.4, 0.0, 0.0))
+                    elseif string.find(name, "Hammer") or string.find(name, "Pick_") or string.find(name, "Shield") then
+                        if string.find(name, "Restoration") then
+                            state:set_rotation_offset(Vector3f.new(1.4, 1.8, 0.0))
+                        else
+                            state:set_rotation_offset(Vector3f.new(0.4, 1.8, 0.0))
+                        end
+                    else
+                        state:set_rotation_offset(weapon_rotation_offset)
+                    end
                 end
             end
         end
@@ -161,6 +170,11 @@ uevr.sdk.callbacks.on_early_calculate_stereo_view_offset(function(device, view_i
     disable_camera_effects(pawn)
     local head_pos = get_head_position(pawn)
     position.x, position.y, position.z = head_pos.X, head_pos.Y, head_pos.Z + 70
+
+    -- Smooths the camera transition to prevent jitter
+    local new_position = lerp_position(position, head_pos, 0.1)
+    position.x, position.y, position.z = new_position.X, new_position.Y, new_position.Z
+
     update_character_rotation(pawn, rotation)
 
     local camera_component = pawn:GetComponentByClass(api:find_uobject("Class /Script/Engine.CameraComponent"))
