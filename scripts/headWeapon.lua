@@ -1,29 +1,41 @@
 local api = uevr.api
 local vr = uevr.params.vr
 
--- UObject references
+-- Helper function that ensures UObject references exist, or throws an error
+local function find_required_object(name)
+    local obj = uevr.api:find_uobject(name)
+    if not obj then error("Cannot find " .. name) end
+    return obj
+end
+
 local hitresult_c = api:find_uobject("ScriptStruct /Script/Engine.HitResult")
 local LegacyCameraShake_c = api:find_uobject("Class /Script/GameplayCameras.MatineeCameraShake")
+local game_engine_class = find_required_object("Class /Script/Engine.GameEngine")
+local ftransform_c = find_required_object("ScriptStruct /Script/CoreUObject.Transform")
+local temp_transform = StructObject.new(ftransform_c)
 
--- Weapon offset configuration (for aligning with hand in VR)
+local find_static_class = function(name)
+    local c = find_required_object(name)
+    return c:get_class_default_object()
+end
+
+local Statics = find_static_class("Class /Script/Engine.GameplayStatics")
+
 local weapon_location_offset = Vector3f.new(0.0, 0.0, 0.0)
 local weapon_rotation_offset = Vector3f.new(0.4, 0.0, 0.0)
 
--- Globals
 local empty_hitresult = StructObject.new(hitresult_c)
 local swinging_fast = false
+-- Minimum swing speed required to trigger a melee gesture
 local swing_threshold = 2.5
+-- Cooldown in seconds between valid melee swing detections
 local swing_cooldown = 0.15
 local config_filename = "moriaconfig.txt"
 local config_data = ""
 local gesture_on = 1
+-- Hide a specific mesh component from rendering
 local hide_Mesh_bool = true
 
--- Respawn handling
-local last_pawn = nil
-local respawn_tick_delay = 0
-
--- Runtime melee motion data
 local melee_data = {
     pos_now = Vector3f.new(0, 0, 0),
     pos_prev = Vector3f.new(0, 0, 0),
@@ -34,17 +46,14 @@ local melee_data = {
 
 local saved_rotation = nil
 
-local function find_required_object(name)
-    local obj = uevr.api:find_uobject(name)
-    if not obj then error("Cannot find " .. name) end
-    return obj
-end
 
+-- Save gesture configuration to disk
 local function write_config()
     config_data = "gesture =" .. tostring(gesture_on) .. "\n"
     fs.write(config_filename, config_data)
 end
 
+-- Load gesture configuration from disk
 local function read_config()
     config_data = fs.read(config_filename)
     if config_data then
@@ -58,6 +67,7 @@ local function read_config()
     end
 end
 
+-- Hide a specific mesh component from rendering
 local function hide_Mesh(name)
     if name then
         name:SetRenderInMainPass(false)
@@ -65,42 +75,47 @@ local function hide_Mesh(name)
     end
 end
 
+-- Update weapon attachment logic and motion controller alignment
 local function update_weapon_motion_controller()
     local pawn = api:get_local_pawn(0)
     if not pawn or type(pawn.Children) ~= "table" then return end
 
-    for _, component in ipairs(pawn.Children) do
-        print(pawn)
-        print(pawn.Children)
-        if component and component.RootComponent and UEVR_UObjectHook.exists(component) then
-            print("comp", component:get_full_name())
-            if (string.find(component:get_full_name(), "EQ_")) or string.find(component:get_full_name(), "Torch") then
-                local state = UEVR_UObjectHook.get_or_add_motion_controller_state(component.RootComponent)
-                if state then
-                    local name = component:get_full_name()
-                    if string.find(name, "Torch") then
-                        if component.RaycastMesh then hide_Mesh(component.RaycastMesh) end
-                        state:set_hand(0)
-                    elseif string.find(name, "Shield") then
-                        state:set_hand(0)
-                    else
-                        state:set_hand(1)
-                    end
-                    state:set_permanent(true)
-                    state:set_location_offset(weapon_location_offset)
-
-                    if string.find(name, "Mattock") then
-                        state:set_rotation_offset(Vector3f.new(0.4, 3.3, 0.0))
-                    elseif string.find(name, "Hammer_2h") then
-                        state:set_rotation_offset(Vector3f.new(0.4, 0.0, 0.0))
-                    elseif string.find(name, "Hammer") or string.find(name, "Pick_") or string.find(name, "Shield") then
-                        if string.find(name, "Restoration") then
-                            state:set_rotation_offset(Vector3f.new(1.4, 1.8, 0.0))
+    local mesh = pawn.Mesh
+    for _, component in ipairs(mesh.AttachChildren) do
+        if component and UEVR_UObjectHook.exists(component) then
+            if string.find(component:get_full_name(), "SceneComponent") then
+                print("comp", component:get_full_name())
+                if (string.find(component:get_full_name(), "EQ_")) or string.find(component:get_full_name(), "Torch") then
+                local state = UEVR_UObjectHook.get_or_add_motion_controller_state(component)
+                    if state then
+                        local name = component:get_full_name()
+                        if string.find(name, "Torch") then
+-- Hide a specific mesh component from rendering
+                            if component.RaycastMesh then hide_Mesh(component.RaycastMesh) end
+                            state:set_hand(0)
+                        elseif string.find(name, "Shield") then
+                            state:set_hand(0)
                         else
-                            state:set_rotation_offset(Vector3f.new(0.4, 1.8, 0.0))
+                            state:set_hand(1)
                         end
-                    else
-                        state:set_rotation_offset(weapon_rotation_offset)
+                        state:set_permanent(true)
+-- Offset used to align weapon position with VR hand
+                        state:set_location_offset(weapon_location_offset)
+
+                        if string.find(name, "Mattock") then
+                            state:set_rotation_offset(Vector3f.new(0.4, 3.3, 0.0))
+                        elseif string.find(name, "Hammer_2h") then
+                            state:set_rotation_offset(Vector3f.new(0.4, 0.0, 0.0))
+                        elseif string.find(name, "Hammer") or string.find(name, "Pick_") or string.find(name, "Shield") then
+                            if string.find(name, "Restoration") then
+                                state:set_rotation_offset(Vector3f.new(1.4, 1.8, 0.0))
+                            else
+                                state:set_rotation_offset(Vector3f.new(0.4, 1.8, 0.0))
+                            end
+                        else
+-- Offset used to align weapon rotation with VR hand
+                            state:set_rotation_offset(weapon_rotation_offset)
+                        end
                     end
                 end
             end
@@ -108,6 +123,7 @@ local function update_weapon_motion_controller()
     end
 end
 
+-- Disable camera lag and rotation smoothing for a sharper VR experience
 local function disable_camera_effects(pawn)
     local camera_component = pawn:GetComponentByClass(api:find_uobject("Class /Script/Engine.CameraComponent"))
     local attach_parent = camera_component and camera_component.AttachParent
@@ -121,12 +137,14 @@ local function disable_camera_effects(pawn)
     end
 end
 
+-- Update character rotation to match the HMD orientation
 local function update_character_rotation(pawn, rotation)
     local character_rotation = pawn:K2_GetActorRotation()
     character_rotation.Yaw = rotation.Yaw
     pawn:K2_SetActorRotation(character_rotation, false)
 end
 
+-- Linearly interpolate between two positions (used for camera smoothing)
 local function lerp_position(from, to, alpha)
     return Vector3f.new(
         from.X + (to.X - from.X) * alpha,
@@ -135,6 +153,7 @@ local function lerp_position(from, to, alpha)
     )
 end
 
+-- Get the position of the character's head bone, or approximate if missing
 local function get_head_position(pawn)
     if not pawn or not pawn.Mesh then
         print("Error: Mesh not found!")
@@ -149,12 +168,15 @@ local function get_head_position(pawn)
     end
 end
 
+-- Load gesture configuration from disk
 read_config()
 
+-- VR callback: adjust the camera before rendering to match head position
 uevr.sdk.callbacks.on_early_calculate_stereo_view_offset(function(device, view_index, world_to_meters, position, rotation, is_double)
     local pawn = api:get_local_pawn(0)
     if not pawn then return end
 
+-- Hide a specific mesh component from rendering
     hide_Mesh(pawn.SK_Backpack)
     hide_Mesh(pawn.SK_BaseBody)
     hide_Mesh(pawn.SK_Beard)
@@ -167,14 +189,18 @@ uevr.sdk.callbacks.on_early_calculate_stereo_view_offset(function(device, view_i
     hide_Mesh(pawn.SK_Head)
     hide_Mesh(pawn.SK_Legs)
 
+-- Disable camera lag and rotation smoothing for a sharper VR experience
     disable_camera_effects(pawn)
+
+-- Get the position of the character's head bone, or approximate if missing
     local head_pos = get_head_position(pawn)
     position.x, position.y, position.z = head_pos.X, head_pos.Y, head_pos.Z + 70
 
-    -- Smooths the camera transition to prevent jitter
+-- Linearly interpolate between two positions (used for camera smoothing)
     local new_position = lerp_position(position, head_pos, 0.1)
     position.x, position.y, position.z = new_position.X, new_position.Y, new_position.Z
 
+-- Update character rotation to match the HMD orientation
     update_character_rotation(pawn, rotation)
 
     local camera_component = pawn:GetComponentByClass(api:find_uobject("Class /Script/Engine.CameraComponent"))
@@ -193,12 +219,14 @@ uevr.sdk.callbacks.on_early_calculate_stereo_view_offset(function(device, view_i
     end
 end)
 
+-- VR callback: inject input when gesture-based swing is active
 uevr.sdk.callbacks.on_xinput_get_state(function(retval, user_index, state)
     if gesture_on == 1 and state and swinging_fast then
         state.Gamepad.bRightTrigger = 200
     end
 end)
 
+-- UI callback: draw mod settings menu in ImGui
 uevr.sdk.callbacks.on_draw_ui(function()
     imgui.text("The Lord of the Rings: Return to Moria Mod Settings")
     imgui.text("Mod by Vilmar de Paula")
@@ -214,6 +242,7 @@ uevr.sdk.callbacks.on_draw_ui(function()
     end
 
     if needs_save then
+-- Save gesture configuration to disk
         write_config()
     end
 end)
@@ -236,34 +265,33 @@ if ReceivePlayShake then
     end)
 end
 
+-- Main per-frame logic for motion tracking and gesture detection
 uevr.sdk.callbacks.on_pre_engine_tick(function(engine, delta)
     if not vr.is_hmd_active() then return end
 
-    local current_pawn = api:get_local_pawn(0)
-    if current_pawn ~= last_pawn then
-        print("[DEBUG] Novo pawn detectado: aguardando 60 ticks para estabilização...")
-        respawn_tick_delay = 60
-        last_pawn = current_pawn
-    end
+    vr.set_mod_value("VR_RenderingMethod", "0") -- Native Stereo. Synced sequential doesn't work atm but people shouldnt be using that anyways
+    vr.set_mod_value("VR_CameraForwardOffset", "0.0") -- Reset camera offsets so weapons look correct and pivot positions are correct
+    vr.set_mod_value("VR_CameraUpOffset", "0.0")
+    vr.set_mod_value("VR_CameraRightOffset", "0.0")
 
-    if respawn_tick_delay > 0 then
-        respawn_tick_delay = respawn_tick_delay - 1
-        return
-    end
-
+-- Update weapon attachment logic and motion controller alignment
     update_weapon_motion_controller()
 
     if gesture_on == 1 then
+-- Fetch the current pose (position & rotation) of the right hand controller
         vr.get_pose(vr.get_right_controller_index(), melee_data.raw, melee_data.q)
 
         melee_data.pos_prev:set(melee_data.pos_now.x, melee_data.pos_now.y, melee_data.pos_now.z)
         melee_data.pos_now:set(melee_data.raw.x, melee_data.raw.y, melee_data.raw.z)
 
+-- Calculate hand movement velocity for gesture recognition
         local velocity = (melee_data.pos_now - melee_data.pos_prev) * (1 / delta)
         local vel_len = velocity:length()
 
         local now = os.clock()
+-- Minimum swing speed required to trigger a melee gesture
         if velocity.y < 0 and vel_len >= swing_threshold then
+-- Cooldown in seconds between valid melee swing detections
             if (now - melee_data.last_swing_time) > swing_cooldown then
                 swinging_fast = true
                 melee_data.last_swing_time = now
